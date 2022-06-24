@@ -1,4 +1,4 @@
-use crate::ring::{pad_ring_to_2n, Ring};
+use crate::ring::*;
 use k256::elliptic_curve::Field;
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use rand_core::OsRng;
@@ -16,7 +16,12 @@ pub struct Signature {
 // NOTE n = 2, i.e. N = 2^m
 // N - number of elements in the ring (should be padded to 2^m)
 impl Signature {
-    pub fn new(index: u32, mut ring: Ring, pedersen_h: AffinePoint) -> Result<Self, String> {
+    pub fn new(
+        index: usize,
+        mut ring: Ring,
+        h_point: AffinePoint,
+        j_point: AffinePoint,
+    ) -> Result<Self, String> {
         let m = pad_ring_to_2n(&mut ring)?;
 
         let a_vec = (0..m)
@@ -28,9 +33,8 @@ impl Signature {
 
         // NOTE max exponent of 2 is 32, i.e. max ring len = 2^32
         assert!(m <= 32);
-        assert!(1 << (m as u32) > index);
-        let b_vec = deltas(index, m); // sigma vec
-                                      //
+        assert!(1 << m > index);
+        let b_vec = deltas(index as u32, m); // sigma vec
         let c_vec = a_vec
             .iter()
             .zip(b_vec.iter())
@@ -50,13 +54,14 @@ impl Signature {
             })
             .collect::<Vec<VecElem>>();
 
-        // TODO generate commitments A, B, C, D
+        let mut omegas = Vec::<Scalar>::with_capacity(m);
+        let mut rho = Vec::<Scalar>::with_capacity(m);
         let mut generators = Vec::<[AffinePoint; 2]>::with_capacity(m);
         let mut a_com_gen = ProjectivePoint::IDENTITY;
         let mut b_com_gen = ProjectivePoint::IDENTITY;
         let mut c_com_gen = ProjectivePoint::IDENTITY;
         let mut d_com_gen = ProjectivePoint::IDENTITY;
-        for i in 0..(m as usize) {
+        for i in 0..m {
             let generator_0 = (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine();
             let generator_1 = (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine();
             a_com_gen += generator_0 * a_vec[i].i_0;
@@ -68,14 +73,51 @@ impl Signature {
             d_com_gen += generator_0 * d_vec[i].i_0;
             d_com_gen += generator_1 * d_vec[i].i_1;
             generators.push([generator_0, generator_1]);
+            omegas.push(Scalar::random(OsRng)); // x points for polynomial interpolation
+            rho.push(Scalar::random(OsRng));
         }
 
-        let a_com = (pedersen_h * Scalar::random(OsRng) + a_com_gen).to_affine();
-        let b_com = (pedersen_h * Scalar::random(OsRng) + b_com_gen).to_affine();
-        let c_com = (pedersen_h * Scalar::random(OsRng) + c_com_gen).to_affine();
-        let d_com = (pedersen_h * Scalar::random(OsRng) + d_com_gen).to_affine();
+        let a_com = (h_point * Scalar::random(OsRng) + a_com_gen).to_affine();
+        let b_com = (h_point * Scalar::random(OsRng) + b_com_gen).to_affine();
+        let c_com = (h_point * Scalar::random(OsRng) + c_com_gen).to_affine();
+        let d_com = (h_point * Scalar::random(OsRng) + d_com_gen).to_affine();
 
-        for k in 0..ring.len() {}
+        let mut coeff_vecs = vec![Vec::<Scalar>::with_capacity(m); ring.len()];
+
+        for k in 0..ring.len() {
+            let mut highest_order = omegas[m - 1];
+            let mut evals = vec![Scalar::ONE; m];
+            for j in 0..m {
+                highest_order *= omegas[m - 1];
+                if k & (1 << j) == 0 {
+                    evals[j] *= b_vec[j].i_0 * omegas[j] + a_vec[j].i_0;
+                } else {
+                    evals[j] *= b_vec[j].i_0 * omegas[j] + a_vec[j].i_0;
+                }
+            }
+            if k == index {
+                for j in 0..m {
+                    evals[j] -= highest_order;
+                }
+            }
+
+            // TODO unwrap
+            let coeffs = interpolate(&omegas, &evals).unwrap();
+            coeff_vecs.push(coeffs);
+        }
+
+        let mut x_points = Vec::<AffinePoint>::with_capacity(m);
+        let mut y_points = Vec::<AffinePoint>::with_capacity(m);
+
+        for j in 0..m {
+            let mut sum = ProjectivePoint::IDENTITY;
+            for k in 0..ring.len() {
+                sum += ring[k] * coeff_vecs[k][j];
+            }
+
+            x_points.push((sum + ProjectivePoint::GENERATOR * rho[j]).to_affine());
+            y_points.push((j_point * rho[j]).to_affine());
+        }
 
         todo!();
     }
