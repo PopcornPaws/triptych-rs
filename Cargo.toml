@@ -10,4 +10,5 @@ crate-type = ["cdylib"]
 getrandom = { version = "0.2", features = ["js"] }
 k256 = { version = "0.11", default-features = false, features = ["arithmetic"] }
 rand_core = { version = "0.6.3", default-features = false, features = ["getrandom"] }
+sha3 = "0.10"
 wasm-bindgen = { version = "0.2", features = ["serde-serialize"] }

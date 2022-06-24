@@ -1,7 +1,9 @@
 use crate::ring::*;
-use k256::elliptic_curve::Field;
+use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::{Field, PrimeField};
 use k256::{AffinePoint, ProjectivePoint, Scalar};
 use rand_core::OsRng;
+use sha3::{Digest, Keccak256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VecElem {
@@ -10,7 +12,16 @@ struct VecElem {
 }
 
 pub struct Signature {
-    tag: AffinePoint,
+    a_commitment: AffinePoint,
+    b_commitment: AffinePoint,
+    c_commitment: AffinePoint,
+    d_commitment: AffinePoint,
+    x_points: Vec<AffinePoint>,
+    y_points: Vec<AffinePoint>,
+    f_scalars: Vec<VecElem>,
+    z_a_point: AffinePoint,
+    z_c_point: AffinePoint,
+    z_scalar: Scalar,
 }
 
 // NOTE n = 2, i.e. N = 2^m
@@ -19,11 +30,12 @@ impl Signature {
     pub fn new(
         index: usize,
         mut ring: Ring,
+        privkey: Scalar,
         h_point: AffinePoint,
         j_point: AffinePoint,
     ) -> Result<Self, String> {
+        let mut hasher = Keccak256::new();
         let m = pad_ring_to_2n(&mut ring)?;
-
         let a_vec = (0..m)
             .map(|_| {
                 let i_0 = Scalar::random(OsRng);
@@ -55,7 +67,7 @@ impl Signature {
             .collect::<Vec<VecElem>>();
 
         let mut omegas = Vec::<Scalar>::with_capacity(m);
-        let mut rho = Vec::<Scalar>::with_capacity(m);
+        let mut rho_vec = Vec::<Scalar>::with_capacity(m);
         let mut generators = Vec::<[AffinePoint; 2]>::with_capacity(m);
         let mut a_com_gen = ProjectivePoint::IDENTITY;
         let mut b_com_gen = ProjectivePoint::IDENTITY;
@@ -74,13 +86,18 @@ impl Signature {
             d_com_gen += generator_1 * d_vec[i].i_1;
             generators.push([generator_0, generator_1]);
             omegas.push(Scalar::random(OsRng)); // x points for polynomial interpolation
-            rho.push(Scalar::random(OsRng));
+            rho_vec.push(Scalar::random(OsRng));
         }
 
         let a_com = (h_point * Scalar::random(OsRng) + a_com_gen).to_affine();
         let b_com = (h_point * Scalar::random(OsRng) + b_com_gen).to_affine();
         let c_com = (h_point * Scalar::random(OsRng) + c_com_gen).to_affine();
         let d_com = (h_point * Scalar::random(OsRng) + d_com_gen).to_affine();
+
+        hasher.update(a_com.to_bytes());
+        hasher.update(b_com.to_bytes());
+        hasher.update(c_com.to_bytes());
+        hasher.update(d_com.to_bytes());
 
         let mut coeff_vecs = vec![Vec::<Scalar>::with_capacity(m); ring.len()];
 
@@ -92,12 +109,12 @@ impl Signature {
                 if k & (1 << j) == 0 {
                     evals[j] *= b_vec[j].i_0 * omegas[j] + a_vec[j].i_0;
                 } else {
-                    evals[j] *= b_vec[j].i_0 * omegas[j] + a_vec[j].i_0;
+                    evals[j] *= b_vec[j].i_1 * omegas[j] + a_vec[j].i_1;
                 }
             }
             if k == index {
-                for j in 0..m {
-                    evals[j] -= highest_order;
+                for eval in evals.iter_mut() {
+                    *eval -= highest_order;
                 }
             }
 
@@ -109,17 +126,56 @@ impl Signature {
         let mut x_points = Vec::<AffinePoint>::with_capacity(m);
         let mut y_points = Vec::<AffinePoint>::with_capacity(m);
 
-        for j in 0..m {
+        for (j, rho) in rho_vec.iter().enumerate() {
             let mut sum = ProjectivePoint::IDENTITY;
             for k in 0..ring.len() {
                 sum += ring[k] * coeff_vecs[k][j];
             }
+            let x = (sum + ProjectivePoint::GENERATOR * rho).to_affine();
+            let y = (j_point * rho).to_affine();
+            hasher.update(x.to_bytes());
+            hasher.update(y.to_bytes());
 
-            x_points.push((sum + ProjectivePoint::GENERATOR * rho[j]).to_affine());
-            y_points.push((j_point * rho[j]).to_affine());
+            x_points.push(x);
+            y_points.push(y);
         }
 
-        todo!();
+        // TODO unwrap
+        let xi = Scalar::from_repr(hasher.finalize()).unwrap();
+
+        let mut f_vec = Vec::<VecElem>::with_capacity(m);
+        for j in 0..m {
+            f_vec.push(VecElem {
+                i_0: b_vec[j].i_0 * xi + a_vec[j].i_0,
+                i_1: b_vec[j].i_1 * xi + a_vec[j].i_1,
+            });
+        }
+
+        let z_a = b_com * xi + a_com;
+        let z_c = c_com * xi + d_com;
+
+        let mut xi_pow = Scalar::ONE;
+        let z_sum = rho_vec.iter().fold(Scalar::ZERO, |acc, &r| {
+            let next = r * xi_pow;
+            xi_pow *= xi;
+            acc + next
+        });
+
+        // note x_pow here should be xi^m due to stuff in fold
+        let z_scalar = privkey * xi_pow - z_sum;
+
+        Ok(Self {
+            a_commitment: a_com,
+            b_commitment: b_com,
+            c_commitment: c_com,
+            d_commitment: d_com,
+            x_points,
+            y_points,
+            f_scalars: f_vec,
+            z_a_point: z_a.to_affine(),
+            z_c_point: z_c.to_affine(),
+            z_scalar,
+        })
     }
 }
 
