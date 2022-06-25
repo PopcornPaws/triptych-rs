@@ -22,6 +22,7 @@ pub struct Signature {
     z_a_point: AffinePoint,
     z_c_point: AffinePoint,
     z_scalar: Scalar,
+    tag: AffinePoint,
 }
 
 // NOTE n = 2, i.e. N = 2^m
@@ -30,11 +31,19 @@ impl Signature {
     pub fn new(
         index: usize,
         mut ring: Ring,
+        ring_hash: &[u8],
+        message_hash: &[u8],
         privkey: Scalar,
         h_point: AffinePoint,
-        j_point: AffinePoint,
+        u_point: AffinePoint,
     ) -> Result<Self, String> {
         let mut hasher = Keccak256::new();
+        hasher.update(message_hash);
+        hasher.update(ring_hash);
+
+        // TODO unwrap
+        let j_point = u_point * privkey.invert().unwrap();
+
         let m = pad_ring_to_2n(&mut ring)?;
         let a_vec = (0..m)
             .map(|_| {
@@ -175,7 +184,12 @@ impl Signature {
             z_a_point: z_a.to_affine(),
             z_c_point: z_c.to_affine(),
             z_scalar,
+            tag: j_point.to_affine(),
         })
+    }
+
+    pub fn verify(&self) {
+        todo!();
     }
 }
 
