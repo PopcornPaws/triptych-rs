@@ -25,8 +25,8 @@ pub struct Signature {
     x_points: Vec<AffinePoint>,
     y_points: Vec<AffinePoint>,
     f_scalars: Vec<VecElem<Scalar>>,
-    z_a_point: AffinePoint,
-    z_c_point: AffinePoint,
+    z_a_scalar: Scalar,
+    z_c_scalar: Scalar,
     z_scalar: Scalar,
     tag: AffinePoint,
 }
@@ -101,10 +101,15 @@ impl Signature {
             rho_vec.push(Scalar::random(OsRng));
         }
 
-        let a_com = (parameters.h_point * Scalar::random(OsRng) + a_com_gen).to_affine();
-        let b_com = (parameters.h_point * Scalar::random(OsRng) + b_com_gen).to_affine();
-        let c_com = (parameters.h_point * Scalar::random(OsRng) + c_com_gen).to_affine();
-        let d_com = (parameters.h_point * Scalar::random(OsRng) + d_com_gen).to_affine();
+        let r_a = Scalar::random(OsRng);
+        let r_b = Scalar::random(OsRng);
+        let r_c = Scalar::random(OsRng);
+        let r_d = Scalar::random(OsRng);
+
+        let a_com = (parameters.h_point * r_a + a_com_gen).to_affine();
+        let b_com = (parameters.h_point * r_b + b_com_gen).to_affine();
+        let c_com = (parameters.h_point * r_c + c_com_gen).to_affine();
+        let d_com = (parameters.h_point * r_d + d_com_gen).to_affine();
 
         hasher.update(a_com.to_bytes());
         hasher.update(b_com.to_bytes());
@@ -163,8 +168,8 @@ impl Signature {
             });
         }
 
-        let z_a = b_com * xi + a_com;
-        let z_c = c_com * xi + d_com;
+        let z_a = r_b * xi + r_a;
+        let z_c = r_c * xi + r_d;
 
         let mut xi_pow = Scalar::ONE;
         let z_sum = rho_vec.iter().fold(Scalar::ZERO, |acc, &r| {
@@ -184,16 +189,81 @@ impl Signature {
             x_points,
             y_points,
             f_scalars: f_vec,
-            z_a_point: z_a.to_affine(),
-            z_c_point: z_c.to_affine(),
+            z_a_scalar: z_a,
+            z_c_scalar: z_c,
             z_scalar,
             tag: j_point.to_affine(),
         })
     }
 
-    pub fn verify(&self, ring: &Ring, message_hash: &[u8], ring_hash: &[u8]) -> Result<(), String> {
+    pub fn verify(
+        &self,
+        ring: &Ring,
+        message_hash: &[u8],
+        ring_hash: &[u8],
+        parameters: &Parameters,
+    ) -> Result<(), String> {
+        let mut hasher = Keccak256::new();
+        hasher.update(message_hash);
+        hasher.update(ring_hash);
+
         let mut ring = ring.to_owned();
         let m = pad_ring_to_2n(&mut ring)?;
+
+        hasher.update(self.a_commitment.to_bytes());
+        hasher.update(self.b_commitment.to_bytes());
+        hasher.update(self.c_commitment.to_bytes());
+        hasher.update(self.d_commitment.to_bytes());
+
+        for (x, y) in self.x_points.iter().zip(self.y_points.iter()) {
+            hasher.update(x.to_bytes());
+            hasher.update(y.to_bytes());
+        }
+
+        let xi = Scalar::from_repr(hasher.finalize()).unwrap();
+
+        let (f_0_0, f_1_0) = self
+            .f_scalars
+            .iter()
+            .fold((Scalar::ZERO, Scalar::ZERO), |(acc_0, acc_1), elem| {
+                (acc_0 + elem.i_0, acc_1 + elem.i_1)
+            });
+
+        let f_0_0 = xi - f_0_0;
+        let f_1_0 = xi - f_1_0;
+
+        // check commitments
+        let mut gen_0_f = parameters.generators[0].i_0 * f_0_0;
+        let mut gen_1_f = parameters.generators[0].i_1 * f_1_0;
+        let mut gen_0_f_xi = parameters.generators[0].i_0 * (f_0_0 * (xi - f_0_0));
+        let mut gen_1_f_xi = parameters.generators[0].i_1 * (f_1_0 * (xi - f_1_0));
+
+        for (g, f) in parameters
+            .generators
+            .iter()
+            .skip(1)
+            .zip(self.f_scalars.iter().skip(1))
+        {
+            gen_0_f += g.i_0 * f.i_0;
+            gen_1_f += g.i_1 * f.i_1;
+            gen_0_f_xi += g.i_0 * (f.i_0 * (xi - f.i_0));
+            gen_1_f_xi += g.i_1 * (f.i_1 * (xi - f.i_1));
+        }
+
+        let com_f = (gen_0_f + gen_1_f + parameters.h_point * self.z_a_scalar).to_affine();
+        let com_f_xi = (gen_0_f_xi + gen_1_f_xi + parameters.h_point * self.z_c_scalar).to_affine();
+
+        if (ProjectivePoint::from(self.a_commitment) + self.b_commitment * xi).to_affine() != com_f
+        {
+            return Err("ab commitment mismatch".to_owned());
+        }
+
+        if (ProjectivePoint::from(self.d_commitment) + self.c_commitment * xi).to_affine()
+            != com_f_xi
+        {
+            return Err("cd commitment mismatch".to_owned());
+        }
+
         todo!();
     }
 }
