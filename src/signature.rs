@@ -5,10 +5,16 @@ use k256::{AffinePoint, ProjectivePoint, Scalar};
 use rand_core::OsRng;
 use sha3::{Digest, Keccak256};
 
+pub struct Parameters {
+    generators: Vec<VecElem<AffinePoint>>,
+    h_point: AffinePoint,
+    u_point: AffinePoint,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct VecElem {
-    i_0: Scalar,
-    i_1: Scalar,
+struct VecElem<T: Clone + Copy + std::fmt::Debug + PartialEq + Eq> {
+    i_0: T,
+    i_1: T,
 }
 
 pub struct Signature {
@@ -18,7 +24,7 @@ pub struct Signature {
     d_commitment: AffinePoint,
     x_points: Vec<AffinePoint>,
     y_points: Vec<AffinePoint>,
-    f_scalars: Vec<VecElem>,
+    f_scalars: Vec<VecElem<Scalar>>,
     z_a_point: AffinePoint,
     z_c_point: AffinePoint,
     z_scalar: Scalar,
@@ -30,27 +36,27 @@ pub struct Signature {
 impl Signature {
     pub fn new(
         index: usize,
-        mut ring: Ring,
+        ring: &Ring,
         ring_hash: &[u8],
         message_hash: &[u8],
         privkey: Scalar,
-        h_point: AffinePoint,
-        u_point: AffinePoint,
+        parameters: &Parameters,
     ) -> Result<Self, String> {
         let mut hasher = Keccak256::new();
         hasher.update(message_hash);
         hasher.update(ring_hash);
 
         // TODO unwrap
-        let j_point = u_point * privkey.invert().unwrap();
+        let j_point = parameters.u_point * privkey.invert().unwrap();
 
+        let mut ring = ring.to_owned();
         let m = pad_ring_to_2n(&mut ring)?;
         let a_vec = (0..m)
             .map(|_| {
                 let i_0 = Scalar::random(OsRng);
                 VecElem { i_0, i_1: -i_0 }
             })
-            .collect::<Vec<VecElem>>();
+            .collect::<Vec<VecElem<Scalar>>>();
 
         // NOTE max exponent of 2 is 32, i.e. max ring len = 2^32
         assert!(m <= 32);
@@ -64,7 +70,7 @@ impl Signature {
                 let i_1 = a.i_1 * (Scalar::ONE - (b.i_1 + b.i_1));
                 VecElem { i_0, i_1 }
             })
-            .collect::<Vec<VecElem>>();
+            .collect::<Vec<VecElem<Scalar>>>();
 
         let d_vec = a_vec
             .iter()
@@ -73,35 +79,32 @@ impl Signature {
                 let i_1 = -(a.i_1 * a.i_1);
                 VecElem { i_0, i_1 }
             })
-            .collect::<Vec<VecElem>>();
+            .collect::<Vec<VecElem<Scalar>>>();
 
         let mut omegas = Vec::<Scalar>::with_capacity(m);
         let mut rho_vec = Vec::<Scalar>::with_capacity(m);
-        let mut generators = Vec::<[AffinePoint; 2]>::with_capacity(m);
         let mut a_com_gen = ProjectivePoint::IDENTITY;
         let mut b_com_gen = ProjectivePoint::IDENTITY;
         let mut c_com_gen = ProjectivePoint::IDENTITY;
         let mut d_com_gen = ProjectivePoint::IDENTITY;
-        for i in 0..m {
-            let generator_0 = (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine();
-            let generator_1 = (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine();
-            a_com_gen += generator_0 * a_vec[i].i_0;
-            a_com_gen += generator_1 * a_vec[i].i_1;
-            b_com_gen += generator_0 * b_vec[i].i_0;
-            b_com_gen += generator_1 * b_vec[i].i_1;
-            c_com_gen += generator_0 * c_vec[i].i_0;
-            c_com_gen += generator_1 * c_vec[i].i_1;
-            d_com_gen += generator_0 * d_vec[i].i_0;
-            d_com_gen += generator_1 * d_vec[i].i_1;
-            generators.push([generator_0, generator_1]);
+        assert_eq!(parameters.generators.len(), m);
+        for (i, gen) in parameters.generators.iter().enumerate() {
+            a_com_gen += gen.i_0 * a_vec[i].i_0;
+            a_com_gen += gen.i_1 * a_vec[i].i_1;
+            b_com_gen += gen.i_0 * b_vec[i].i_0;
+            b_com_gen += gen.i_1 * b_vec[i].i_1;
+            c_com_gen += gen.i_0 * c_vec[i].i_0;
+            c_com_gen += gen.i_1 * c_vec[i].i_1;
+            d_com_gen += gen.i_0 * d_vec[i].i_0;
+            d_com_gen += gen.i_1 * d_vec[i].i_1;
             omegas.push(Scalar::random(OsRng)); // x points for polynomial interpolation
             rho_vec.push(Scalar::random(OsRng));
         }
 
-        let a_com = (h_point * Scalar::random(OsRng) + a_com_gen).to_affine();
-        let b_com = (h_point * Scalar::random(OsRng) + b_com_gen).to_affine();
-        let c_com = (h_point * Scalar::random(OsRng) + c_com_gen).to_affine();
-        let d_com = (h_point * Scalar::random(OsRng) + d_com_gen).to_affine();
+        let a_com = (parameters.h_point * Scalar::random(OsRng) + a_com_gen).to_affine();
+        let b_com = (parameters.h_point * Scalar::random(OsRng) + b_com_gen).to_affine();
+        let c_com = (parameters.h_point * Scalar::random(OsRng) + c_com_gen).to_affine();
+        let d_com = (parameters.h_point * Scalar::random(OsRng) + d_com_gen).to_affine();
 
         hasher.update(a_com.to_bytes());
         hasher.update(b_com.to_bytes());
@@ -152,7 +155,7 @@ impl Signature {
         // TODO unwrap
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
-        let mut f_vec = Vec::<VecElem>::with_capacity(m);
+        let mut f_vec = Vec::<VecElem<Scalar>>::with_capacity(m);
         for j in 0..m {
             f_vec.push(VecElem {
                 i_0: b_vec[j].i_0 * xi + a_vec[j].i_0,
@@ -188,12 +191,14 @@ impl Signature {
         })
     }
 
-    pub fn verify(&self) {
+    pub fn verify(&self, ring: &Ring, message_hash: &[u8], ring_hash: &[u8]) -> Result<(), String> {
+        let mut ring = ring.to_owned();
+        let m = pad_ring_to_2n(&mut ring)?;
         todo!();
     }
 }
 
-fn deltas(num: u32, n: usize) -> Vec<VecElem> {
+fn deltas(num: u32, n: usize) -> Vec<VecElem<Scalar>> {
     (0..n)
         .map(|j| {
             if num & 1 << j == 0 {
@@ -208,7 +213,7 @@ fn deltas(num: u32, n: usize) -> Vec<VecElem> {
                 }
             }
         })
-        .collect::<Vec<VecElem>>()
+        .collect::<Vec<VecElem<Scalar>>>()
 }
 
 #[cfg(test)]

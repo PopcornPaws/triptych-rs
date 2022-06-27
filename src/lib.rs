@@ -1,7 +1,8 @@
 #![feature(int_log)]
-mod ring;
-mod signature;
+pub mod ring;
+pub mod signature;
 
+/*
 use k256::elliptic_curve::Field;
 use k256::{AffinePoint, Scalar};
 use rand_core::OsRng;
@@ -23,3 +24,4 @@ fn parse_ring(frontend_ring: FrontendRing) -> Result<ring::Ring, String> {
     // TODO
     Ok(vec![AffinePoint::GENERATOR; 3])
 }
+*/
