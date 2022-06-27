@@ -208,7 +208,7 @@ impl Signature {
         hasher.update(ring_hash);
 
         let mut ring = ring.to_owned();
-        let m = pad_ring_to_2n(&mut ring)?;
+        let _m = pad_ring_to_2n(&mut ring)?;
 
         hasher.update(self.a_commitment.to_bytes());
         hasher.update(self.b_commitment.to_bytes());
@@ -264,7 +264,48 @@ impl Signature {
             return Err("cd commitment mismatch".to_owned());
         }
 
-        todo!();
+        let mut sum_pk_prod_f = ProjectivePoint::IDENTITY;
+        let mut sum_prod_f = Scalar::ZERO;
+        for (k, &pk) in ring.iter().enumerate() {
+            let prod_f = self
+                .f_scalars
+                .iter()
+                .enumerate()
+                .fold(Scalar::ZERO, |acc, (j, f)| {
+                    if k & 1 << j == 0 {
+                        acc * f.i_0
+                    } else {
+                        acc * f.i_1
+                    }
+                });
+
+            sum_pk_prod_f += pk * prod_f;
+            sum_prod_f += prod_f;
+        }
+
+        let mut xi_pow = Scalar::ONE; // xi^0
+        let (x_sum, y_sum) = self.x_points.iter().zip(self.y_points.iter()).fold(
+            (ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY),
+            |(acc_0, acc_1), (&x, &y)| {
+                let next_x = acc_0 + x * xi_pow;
+                let next_y = acc_1 + y * xi_pow;
+                xi_pow *= xi;
+                (next_x, next_y)
+            },
+        );
+
+        let first_zero = sum_pk_prod_f - x_sum - AffinePoint::GENERATOR * self.z_scalar;
+        let second_zero = parameters.u_point * sum_prod_f - y_sum - self.tag * self.z_scalar;
+
+        if first_zero.to_affine() != AffinePoint::IDENTITY {
+            return Err("first constraint is nonzero".to_owned());
+        }
+
+        if second_zero.to_affine() != AffinePoint::IDENTITY {
+            return Err("second constraint is nonzero".to_owned());
+        }
+
+        Ok(())
     }
 }
 
