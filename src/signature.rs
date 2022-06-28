@@ -1,14 +1,41 @@
 use crate::ring::*;
 use k256::elliptic_curve::group::GroupEncoding;
+use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::{Field, PrimeField};
-use k256::{AffinePoint, ProjectivePoint, Scalar};
+use k256::{AffinePoint, ProjectivePoint, Scalar, U256};
 use rand_core::OsRng;
 use sha3::{Digest, Keccak256};
+
+// NOTE this is a public "private key" that determines the U point which tags the
+// signatures
+const U_SCALAR_U256: U256 =
+    U256::from_le_hex("7c81a9587b8da43a9519bd50d96191fd8f2c4f66b8f1550e366e3c7f9ed18897");
 
 pub struct Parameters {
     generators: Vec<VecElem<AffinePoint>>,
     h_point: AffinePoint,
     u_point: AffinePoint,
+}
+
+impl Parameters {
+    pub fn new(n_generators: usize) -> Self {
+        let mut generators = Vec::<VecElem<AffinePoint>>::with_capacity(n_generators);
+        for _ in 0..n_generators {
+            let pt_0 = AffinePoint::GENERATOR * Scalar::random(OsRng);
+            let pt_1 = AffinePoint::GENERATOR * Scalar::random(OsRng);
+            generators.push(VecElem {
+                i_0: pt_0.to_affine(),
+                i_1: pt_1.to_affine(),
+            });
+        }
+
+        Self {
+            generators,
+            h_point: (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            u_point: (AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256))
+                .to_affine(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,8 +114,7 @@ impl Signature {
         let mut b_com_gen = ProjectivePoint::IDENTITY;
         let mut c_com_gen = ProjectivePoint::IDENTITY;
         let mut d_com_gen = ProjectivePoint::IDENTITY;
-        assert_eq!(parameters.generators.len(), m);
-        for (i, gen) in parameters.generators.iter().enumerate() {
+        for (i, gen) in parameters.generators.iter().take(m).enumerate() {
             a_com_gen += gen.i_0 * a_vec[i].i_0;
             a_com_gen += gen.i_1 * a_vec[i].i_1;
             b_com_gen += gen.i_0 * b_vec[i].i_0;
@@ -137,7 +163,7 @@ impl Signature {
 
             // TODO unwrap
             let coeffs = interpolate(&omegas, &evals).unwrap();
-            coeff_vecs.push(coeffs);
+            coeff_vecs[k] = coeffs;
         }
 
         let mut x_points = Vec::<AffinePoint>::with_capacity(m);
@@ -199,8 +225,8 @@ impl Signature {
     pub fn verify(
         &self,
         ring: &Ring,
-        message_hash: &[u8],
         ring_hash: &[u8],
+        message_hash: &[u8],
         parameters: &Parameters,
     ) -> Result<(), String> {
         let mut hasher = Keccak256::new();
@@ -208,7 +234,7 @@ impl Signature {
         hasher.update(ring_hash);
 
         let mut ring = ring.to_owned();
-        let _m = pad_ring_to_2n(&mut ring)?;
+        let m = pad_ring_to_2n(&mut ring)?;
 
         hasher.update(self.a_commitment.to_bytes());
         hasher.update(self.b_commitment.to_bytes());
@@ -241,6 +267,7 @@ impl Signature {
         for (g, f) in parameters
             .generators
             .iter()
+            .take(m)
             .skip(1)
             .zip(self.f_scalars.iter().skip(1))
         {
@@ -331,6 +358,21 @@ fn deltas(num: u32, n: usize) -> Vec<VecElem<Scalar>> {
 mod test {
     use super::*;
 
+    struct Keypair {
+        public: AffinePoint,
+        private: Scalar,
+    }
+
+    impl Keypair {
+        fn random() -> Self {
+            let private = Scalar::random(OsRng);
+            Self {
+                public: (AffinePoint::GENERATOR * private).to_affine(),
+                private,
+            }
+        }
+    }
+
     #[test]
     #[rustfmt::skip]
     fn kronecker_delta() {
@@ -350,5 +392,46 @@ mod test {
         assert_eq!(d[8], VecElem { i_0: Scalar::ONE, i_1: Scalar::ZERO }); // 0
         assert_eq!(d[9], VecElem { i_0: Scalar::ONE, i_1: Scalar::ZERO }); // 0
         assert_eq!(d[10], VecElem { i_0: Scalar::ZERO, i_1: Scalar::ONE }); // 1
+    }
+
+    #[test]
+    fn valid_signature() {
+        let parameters = Parameters::new(10);
+        let keypair = Keypair::random();
+        let ring = vec![
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            keypair.public,
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+        ];
+        let index = 2_usize;
+
+        let mut hasher = Keccak256::new();
+        for r in ring.iter() {
+            hasher.update(r.to_bytes());
+        }
+        let ring_hash = hasher.finalize();
+
+        let msg = b"hello there!";
+        let mut hasher = Keccak256::new();
+        hasher.update(msg);
+        let msg_hash = hasher.finalize();
+
+        let signature = Signature::new(
+            index,
+            &ring,
+            &ring_hash,
+            &msg_hash,
+            keypair.private,
+            &parameters,
+        )
+        .unwrap();
+        assert_eq!(signature.f_scalars.len(), 3);
+        assert_eq!(signature.x_points.len(), 3);
+        assert_eq!(signature.y_points.len(), 3);
+        let result = signature.verify(&ring, &ring_hash, &msg_hash, &parameters);
+        println!("{:?}", result);
+        assert!(result.is_ok());
     }
 }
