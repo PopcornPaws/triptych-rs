@@ -80,15 +80,15 @@ impl Signature {
         let m = pad_ring_to_2n(&mut ring)?;
         let a_vec = (0..m)
             .map(|_| {
-                let i_0 = Scalar::random(OsRng);
-                VecElem { i_0, i_1: -i_0 }
+                let i_1 = Scalar::random(OsRng);
+                VecElem { i_0: -i_1, i_1 }
             })
             .collect::<Vec<VecElem<Scalar>>>();
 
         // NOTE max exponent of 2 is 32, i.e. max ring len = 2^32
         assert!(m <= 32);
         assert!(1 << m > index);
-        let b_vec = deltas(index as u32, m); // sigma vec
+        let b_vec = deltas(index, m); // sigma vec
         let c_vec = a_vec
             .iter()
             .zip(b_vec.iter())
@@ -336,7 +336,7 @@ impl Signature {
     }
 }
 
-fn deltas(num: u32, n: usize) -> Vec<VecElem<Scalar>> {
+fn deltas(num: usize, n: usize) -> Vec<VecElem<Scalar>> {
     (0..n)
         .map(|j| {
             if num & 1 << j == 0 {
@@ -376,7 +376,7 @@ mod test {
     #[test]
     #[rustfmt::skip]
     fn kronecker_delta() {
-        let index = 1234_u32; //0b0000010011010010
+        let index = 1234_usize; //0b0000010011010010
         let m = 11; // N = 2^11
         let d = deltas(index, m);
 
