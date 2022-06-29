@@ -165,10 +165,10 @@ impl Signature {
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
         let mut f_vec = Vec::<VecElem<Scalar>>::with_capacity(m);
-        for j in 0..m {
+        for (a, b) in a_vec.iter().zip(b_vec.iter()) {
             f_vec.push(VecElem {
-                i_0: b_vec[j].i_0 * xi + a_vec[j].i_0,
-                i_1: b_vec[j].i_1 * xi + a_vec[j].i_1,
+                i_0: b.i_0 * xi + a.i_0,
+                i_1: b.i_1 * xi + a.i_1,
             });
         }
 
@@ -176,8 +176,8 @@ impl Signature {
         let z_c = r_c * xi + r_d;
 
         let mut xi_pow = Scalar::ONE;
-        let z_sum = rho_vec.iter().fold(Scalar::ZERO, |acc, &r| {
-            let next = r * xi_pow;
+        let z_sum = rho_vec.iter().fold(Scalar::ZERO, |acc, &rho| {
+            let next = rho * xi_pow;
             xi_pow *= xi;
             acc + next
         });
@@ -201,7 +201,7 @@ impl Signature {
     }
 
     pub fn verify(
-        &self,
+        mut self,
         ring: &Ring,
         ring_hash: &[u8],
         message_hash: &[u8],
@@ -226,28 +226,19 @@ impl Signature {
 
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
-        let (f_0_0, f_1_0) = self
-            .f_scalars
-            .iter()
-            .fold((Scalar::ZERO, Scalar::ZERO), |(acc_0, acc_1), elem| {
-                (acc_0 + elem.i_0, acc_1 + elem.i_1)
-            });
-
-        let f_0_0 = xi - f_0_0;
-        let f_1_0 = xi - f_1_0;
+        self.f_scalars.iter_mut().for_each(|elem| elem.i_0 = xi - elem.i_1);
 
         // check commitments
-        let mut gen_0_f = parameters.generators[0].i_0 * f_0_0;
-        let mut gen_1_f = parameters.generators[0].i_1 * f_1_0;
-        let mut gen_0_f_xi = parameters.generators[0].i_0 * (f_0_0 * (xi - f_0_0));
-        let mut gen_1_f_xi = parameters.generators[0].i_1 * (f_1_0 * (xi - f_1_0));
+        let mut gen_0_f = ProjectivePoint::IDENTITY;
+        let mut gen_1_f = ProjectivePoint::IDENTITY;
+        let mut gen_0_f_xi = ProjectivePoint::IDENTITY;
+        let mut gen_1_f_xi = ProjectivePoint::IDENTITY;
 
         for (g, f) in parameters
             .generators
             .iter()
             .take(m)
-            .skip(1)
-            .zip(self.f_scalars.iter().skip(1))
+            .zip(self.f_scalars.iter())
         {
             gen_0_f += g.i_0 * f.i_0;
             gen_1_f += g.i_1 * f.i_1;
