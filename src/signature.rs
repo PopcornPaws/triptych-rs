@@ -123,7 +123,7 @@ impl Signature {
             c_com_gen += gen.i_1 * c_vec[i].i_1;
             d_com_gen += gen.i_0 * d_vec[i].i_0;
             d_com_gen += gen.i_1 * d_vec[i].i_1;
-            omegas.push(Scalar::random(OsRng)); // x points for polynomial interpolation
+            omegas.push(Scalar::from((i + 2) as u32)); // x points for polynomial interpolation
             rho_vec.push(Scalar::random(OsRng));
         }
 
@@ -142,29 +142,7 @@ impl Signature {
         hasher.update(c_com.to_bytes());
         hasher.update(d_com.to_bytes());
 
-        let mut coeff_vecs = vec![Vec::<Scalar>::with_capacity(m); ring.len()];
-
-        for k in 0..ring.len() {
-            let mut highest_order = omegas[m - 1];
-            let mut evals = vec![Scalar::ONE; m];
-            for j in 0..m {
-                highest_order *= omegas[m - 1];
-                if k & (1 << j) == 0 {
-                    evals[j] *= b_vec[j].i_0 * omegas[j] + a_vec[j].i_0;
-                } else {
-                    evals[j] *= b_vec[j].i_1 * omegas[j] + a_vec[j].i_1;
-                }
-            }
-            if k == index {
-                for eval in evals.iter_mut() {
-                    *eval -= highest_order;
-                }
-            }
-
-            // TODO unwrap
-            let coeffs = interpolate(&omegas, &evals).unwrap();
-            coeff_vecs[k] = coeffs;
-        }
+        let coeff_vecs = get_coeffs(index, ring.len(), m, &a_vec, &b_vec, &omegas);
 
         let mut x_points = Vec::<AffinePoint>::with_capacity(m);
         let mut y_points = Vec::<AffinePoint>::with_capacity(m);
@@ -299,7 +277,7 @@ impl Signature {
                 .iter()
                 .enumerate()
                 .fold(Scalar::ZERO, |acc, (j, f)| {
-                    if k & 1 << j == 0 {
+                    if k & (1 << j) == 0 {
                         acc * f.i_0
                     } else {
                         acc * f.i_1
@@ -354,6 +332,39 @@ fn deltas(num: usize, n: usize) -> Vec<VecElem<Scalar>> {
         .collect::<Vec<VecElem<Scalar>>>()
 }
 
+fn get_coeffs(
+    index: usize,
+    n: usize,
+    m: usize,
+    a_vec: &[VecElem<Scalar>],
+    b_vec: &[VecElem<Scalar>],
+    omegas: &[Scalar],
+) -> Vec<Vec<Scalar>> {
+    let mut coeff_vecs = Vec::<Vec<Scalar>>::new();
+    for k in 0..n {
+        let mut evals = vec![Scalar::ONE; m];
+        for (omega, eval) in omegas.iter().zip(evals.iter_mut()) {
+            let mut highest_order_omega = Scalar::ONE;
+            for j in 0..m {
+                if k & (1 << j) == 0 {
+                    *eval *= b_vec[j].i_0 * omega + a_vec[j].i_0;
+                } else {
+                    *eval *= b_vec[j].i_1 * omega + a_vec[j].i_1;
+                }
+                highest_order_omega *= omega;
+            }
+            if k == index {
+                *eval -= highest_order_omega;
+            }
+        }
+
+        // TODO unwrap
+        let coeffs = interpolate(&omegas, &evals).unwrap();
+        coeff_vecs.push(coeffs);
+    }
+    coeff_vecs
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -392,6 +403,45 @@ mod test {
         assert_eq!(d[8], VecElem { i_0: Scalar::ONE, i_1: Scalar::ZERO }); // 0
         assert_eq!(d[9], VecElem { i_0: Scalar::ONE, i_1: Scalar::ZERO }); // 0
         assert_eq!(d[10], VecElem { i_0: Scalar::ZERO, i_1: Scalar::ONE }); // 1
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn coeff_interpolation() {
+        let m = 2; // exponent
+        let n = 4; // 2^exponent
+        let index = 1; // we are second in the ring
+        let omegas = vec![Scalar::from(2u32), Scalar::from(3u32)];
+        let a_vec = vec![
+            VecElem { i_0: Scalar::ONE, i_1: Scalar::from(2u32) },
+            VecElem { i_0: Scalar::from(3u32), i_1: Scalar::from(4u32) },
+        ];
+        let b_vec = vec![
+            VecElem { i_0: Scalar::from(5u32), i_1: Scalar::from(6u32) },
+            VecElem { i_0: Scalar::from(7u32), i_1: Scalar::from(8u32) },
+        ];
+
+        let coeffs = get_coeffs(index, n, m, &a_vec, &b_vec, &omegas);
+        assert_eq!(-coeffs[0][0], Scalar::from(207u32));
+        assert_eq!(-coeffs[1][0], Scalar::from(240u32));
+        assert_eq!(-coeffs[2][0], Scalar::from(236u32));
+        assert_eq!(-coeffs[3][0], Scalar::from(280u32));
+        assert_eq!(coeffs[0][1], Scalar::from(197u32));
+        assert_eq!(coeffs[1][1], Scalar::from(237u32));
+        assert_eq!(coeffs[2][1], Scalar::from(228u32));
+        assert_eq!(coeffs[3][1], Scalar::from(280u32));
+
+        assert_eq!(coeffs[0][0] + omegas[0] * coeffs[0][1], Scalar::from(187u32));
+        assert_eq!(coeffs[0][0] + omegas[1] * coeffs[0][1], Scalar::from(384u32));
+
+        assert_eq!(coeffs[1][0] + omegas[0] * coeffs[1][1], Scalar::from(234u32));
+        assert_eq!(coeffs[1][0] + omegas[1] * coeffs[1][1], Scalar::from(471u32));
+
+        assert_eq!(coeffs[2][0] + omegas[0] * coeffs[2][1], Scalar::from(220u32));
+        assert_eq!(coeffs[2][0] + omegas[1] * coeffs[2][1], Scalar::from(448u32));
+
+        assert_eq!(coeffs[3][0] + omegas[0] * coeffs[3][1], Scalar::from(280u32));
+        assert_eq!(coeffs[3][0] + omegas[1] * coeffs[3][1], Scalar::from(560u32));
     }
 
     #[test]
