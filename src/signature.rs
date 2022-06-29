@@ -282,9 +282,9 @@ impl Signature {
         let mut xi_pow = Scalar::ONE; // xi^0
         let (x_sum, y_sum) = self.x_points.iter().zip(self.y_points.iter()).fold(
             (ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY),
-            |(acc_0, acc_1), (&x, &y)| {
-                let next_x = acc_0 + x * xi_pow;
-                let next_y = acc_1 + y * xi_pow;
+            |(acc_x, acc_y), (&x, &y)| {
+                let next_x = acc_x + x * xi_pow;
+                let next_y = acc_y + y * xi_pow;
                 xi_pow *= xi;
                 (next_x, next_y)
             },
