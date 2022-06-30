@@ -226,7 +226,9 @@ impl Signature {
 
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
-        self.f_scalars.iter_mut().for_each(|elem| elem.i_0 = xi - elem.i_1);
+        self.f_scalars
+            .iter_mut()
+            .for_each(|elem| elem.i_0 = xi - elem.i_1);
 
         // check commitments
         let mut gen_0_f = ProjectivePoint::IDENTITY;
@@ -260,35 +262,9 @@ impl Signature {
             return Err("cd commitment mismatch".to_owned());
         }
 
-        let mut sum_pk_prod_f = ProjectivePoint::IDENTITY;
-        let mut sum_prod_f = Scalar::ZERO;
-        for (k, &pk) in ring.iter().enumerate() {
-            let prod_f = self
-                .f_scalars
-                .iter()
-                .enumerate()
-                .fold(Scalar::ZERO, |acc, (j, f)| {
-                    if k & (1 << j) == 0 {
-                        acc * f.i_0
-                    } else {
-                        acc * f.i_1
-                    }
-                });
+        let (sum_pk_prod_f, sum_prod_f) = self.sum_f_scalars(&ring);
 
-            sum_pk_prod_f += pk * prod_f;
-            sum_prod_f += prod_f;
-        }
-
-        let mut xi_pow = Scalar::ONE; // xi^0
-        let (x_sum, y_sum) = self.x_points.iter().zip(self.y_points.iter()).fold(
-            (ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY),
-            |(acc_x, acc_y), (&x, &y)| {
-                let next_x = acc_x + x * xi_pow;
-                let next_y = acc_y + y * xi_pow;
-                xi_pow *= xi;
-                (next_x, next_y)
-            },
-        );
+        let (x_sum, y_sum) = self.sum_points_with_challenge(xi);
 
         let first_zero = sum_pk_prod_f - x_sum - AffinePoint::GENERATOR * self.z_scalar;
         let second_zero = parameters.u_point * sum_prod_f - y_sum - self.tag * self.z_scalar;
@@ -302,6 +278,42 @@ impl Signature {
         }
 
         Ok(())
+    }
+
+    fn sum_points_with_challenge(&self, xi: Scalar) -> (ProjectivePoint, ProjectivePoint) {
+        let mut xi_pow = Scalar::ONE; // xi^0
+        self.x_points.iter().zip(self.y_points.iter()).fold(
+            (ProjectivePoint::IDENTITY, ProjectivePoint::IDENTITY),
+            |(acc_x, acc_y), (&x, &y)| {
+                let next_x = acc_x + x * xi_pow;
+                let next_y = acc_y + y * xi_pow;
+                xi_pow *= xi;
+                (next_x, next_y)
+            },
+        )
+    }
+
+    fn sum_f_scalars(&self, ring: &Ring) -> (ProjectivePoint, Scalar) {
+        let mut sum_pk_prod_f = ProjectivePoint::IDENTITY;
+        let mut sum_prod_f = Scalar::ZERO;
+        for (k, &pk) in ring.iter().enumerate() {
+            let prod_f = self
+                .f_scalars
+                .iter()
+                .enumerate()
+                .fold(Scalar::ONE, |acc, (j, f)| {
+                    if k & (1 << j) == 0 {
+                        acc * f.i_0
+                    } else {
+                        acc * f.i_1
+                    }
+                });
+
+            sum_pk_prod_f += pk * prod_f;
+            sum_prod_f += prod_f;
+        }
+
+        (sum_pk_prod_f, sum_prod_f)
     }
 }
 
@@ -375,6 +387,22 @@ mod test {
         }
     }
 
+    fn test_signature() -> Signature {
+        Signature {
+            a_commitment: AffinePoint::IDENTITY,
+            b_commitment: AffinePoint::IDENTITY,
+            c_commitment: AffinePoint::IDENTITY,
+            d_commitment: AffinePoint::IDENTITY,
+            x_points: vec![AffinePoint::GENERATOR; 3],
+            y_points: vec![AffinePoint::GENERATOR; 3],
+            f_scalars: Vec::new(),
+            z_a_scalar: Scalar::ZERO,
+            z_c_scalar: Scalar::ZERO,
+            z_scalar: Scalar::ZERO,
+            tag: AffinePoint::GENERATOR,
+        }
+    }
+
     #[test]
     #[rustfmt::skip]
     fn kronecker_delta() {
@@ -433,6 +461,36 @@ mod test {
 
         assert_eq!(coeffs[3][0] + omegas[0] * coeffs[3][1], Scalar::from(280u32));
         assert_eq!(coeffs[3][0] + omegas[1] * coeffs[3][1], Scalar::from(560u32));
+    }
+
+    #[test]
+    fn sum_xy_points() {
+        let signature = test_signature();
+        let (x_sum, y_sum) = signature.sum_points_with_challenge(Scalar::ONE);
+        assert_eq!(x_sum, AffinePoint::GENERATOR * Scalar::from(3u32));
+        assert_eq!(y_sum, AffinePoint::GENERATOR * Scalar::from(3u32));
+        let (x_sum, y_sum) = signature.sum_points_with_challenge(Scalar::from(3u32));
+        assert_eq!(x_sum, AffinePoint::GENERATOR * Scalar::from(13u32));
+        assert_eq!(y_sum, AffinePoint::GENERATOR * Scalar::from(13u32));
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn sum_f_scalars() {
+        let mut signature = test_signature();
+        let ring = vec![
+            AffinePoint::GENERATOR,
+            (AffinePoint::GENERATOR * Scalar::from(2u32)).to_affine(),
+        ];
+
+        signature.f_scalars = vec![
+            VecElem { i_0: Scalar::ONE, i_1: Scalar::from(2u32) },
+            VecElem { i_0: Scalar::from(3u32), i_1: Scalar::from(4u32) },
+            VecElem { i_0: Scalar::from(5u32), i_1: Scalar::from(6u32) },
+        ];
+
+        let (pk_sum, sum) = signature.sum_f_scalars(&ring);
+        assert_eq!(sum, Scalar::from(45u32));
     }
 
     #[test]
