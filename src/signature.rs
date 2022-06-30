@@ -226,6 +226,9 @@ impl Signature {
             hasher.update(y.to_bytes());
         }
 
+        // NOTE unwrap is fine here as the hasher will always
+        // provide a hash with proper size from which the
+        // scalar is generated
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
         let f_scalars = self

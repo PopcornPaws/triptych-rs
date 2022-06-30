@@ -47,7 +47,12 @@ pub fn interpolate(x: &[Scalar], y: &[Scalar]) -> Result<Vec<Scalar>, String> {
         for j in (1..=n).rev() {
             phi = Scalar::from(j as u64) * s[j] + x[i] * phi;
         }
-        let ff = phi.invert().unwrap();
+        let ff_option = phi.invert();
+        if ff_option.is_some().unwrap_u8() == 0 {
+            return Err("tried to invert a zero scalar".to_owned());
+        }
+        // NOTE unwrap is fine due to the above check
+        let ff = ff_option.unwrap();
         let mut b = Scalar::ONE;
         for j in (0..n).rev() {
             coeffs[j] += b * ff * y[i];
