@@ -6,8 +6,8 @@ use k256::{AffinePoint, ProjectivePoint, Scalar, U256};
 use rand_core::OsRng;
 use sha3::{Digest, Keccak256};
 
-// NOTE this is a public "private key" that determines the U point which is used
-// for tag generation
+// NOTE this is a public "private key" that determines the U point which tags the
+// signatures
 const U_SCALAR_U256: U256 =
     U256::from_le_hex("7c81a9587b8da43a9519bd50d96191fd8f2c4f66b8f1550e366e3c7f9ed18897");
 
@@ -48,7 +48,7 @@ pub struct Signature {
     d_commitment: AffinePoint,
     x_points: Vec<AffinePoint>,
     y_points: Vec<AffinePoint>,
-    f_scalars: Vec<Scalar>,
+    f_scalars: Vec<VecElem<Scalar>>,
     z_a_scalar: Scalar,
     z_c_scalar: Scalar,
     z_scalar: Scalar,
@@ -77,11 +77,10 @@ impl Signature {
 
         // generate signature tag
         let u_point = AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256);
-        if privkey == Scalar::ZERO {
-            return Err("invalid private key".to_owned());
-        }
-        // NOTE privkey is always invertible due to the above check
-        let j_point = u_point * privkey.invert().unwrap();
+        let j_point = u_point
+            * privkey
+                .invert()
+                .ok_or_else(|| "private key is zero".to_owned())?;
 
         let a_vec = (0..m)
             .map(|_| {
@@ -99,6 +98,7 @@ impl Signature {
                 VecElem { i_0, i_1 }
             })
             .collect::<Vec<VecElem<Scalar>>>();
+
         let d_vec = a_vec
             .iter()
             .map(|a| {
@@ -161,14 +161,15 @@ impl Signature {
             y_points.push(y);
         }
 
-        // NOTE unwrap is fine here as the hasher will always
-        // provide a hash with proper size from which the
-        // scalar is generated
+        // TODO unwrap
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
-        let mut f_vec = Vec::<Scalar>::with_capacity(m);
+        let mut f_vec = Vec::<VecElem<Scalar>>::with_capacity(m);
         for (a, b) in a_vec.iter().zip(b_vec.iter()) {
-            f_vec.push(b.i_1 * xi + a.i_1);
+            f_vec.push(VecElem {
+                i_0: b.i_0 * xi + a.i_0,
+                i_1: b.i_1 * xi + a.i_1,
+            });
         }
 
         let z_a = r_b * xi + r_a;
@@ -200,21 +201,18 @@ impl Signature {
     }
 
     pub fn verify(
-        &self,
+        mut self,
         ring: &Ring,
         message_hash: &[u8],
         parameters: &Parameters,
     ) -> Result<(), String> {
+        let u_point = AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256);
         let mut hasher = Keccak256::new();
         hasher.update(message_hash);
+        hasher.update(ring_hash);
 
         let mut ring = ring.to_owned();
         let m = pad_ring_to_2n(&mut ring)?;
-        for pk in ring.iter() {
-            hasher.update(pk.to_bytes())
-        }
-
-        let u_point = AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256);
 
         hasher.update(self.a_commitment.to_bytes());
         hasher.update(self.b_commitment.to_bytes());
@@ -228,14 +226,9 @@ impl Signature {
 
         let xi = Scalar::from_repr(hasher.finalize()).unwrap();
 
-        let f_scalars = self
-            .f_scalars
-            .iter()
-            .map(|&elem| VecElem {
-                i_0: xi - elem,
-                i_1: elem,
-            })
-            .collect::<Vec<VecElem<Scalar>>>();
+        self.f_scalars
+            .iter_mut()
+            .for_each(|elem| elem.i_0 = xi - elem.i_1);
 
         // check commitments
         let mut gen_0_f = ProjectivePoint::IDENTITY;
@@ -243,7 +236,12 @@ impl Signature {
         let mut gen_0_f_xi = ProjectivePoint::IDENTITY;
         let mut gen_1_f_xi = ProjectivePoint::IDENTITY;
 
-        for (g, f) in parameters.generators.iter().take(m).zip(f_scalars.iter()) {
+        for (g, f) in parameters
+            .generators
+            .iter()
+            .take(m)
+            .zip(self.f_scalars.iter())
+        {
             gen_0_f += g.i_0 * f.i_0;
             gen_1_f += g.i_1 * f.i_1;
             gen_0_f_xi += g.i_0 * (f.i_0 * (xi - f.i_0));
@@ -264,7 +262,7 @@ impl Signature {
             return Err("cd commitment mismatch".to_owned());
         }
 
-        let (sum_pk_prod_f, sum_prod_f) = sum_f_scalars(&f_scalars, &ring);
+        let (sum_pk_prod_f, sum_prod_f) = self.sum_f_scalars(&ring);
 
         let (x_sum, y_sum) = self.sum_points_with_challenge(xi);
 
@@ -293,6 +291,29 @@ impl Signature {
                 (next_x, next_y)
             },
         )
+    }
+
+    fn sum_f_scalars(&self, ring: &Ring) -> (ProjectivePoint, Scalar) {
+        let mut sum_pk_prod_f = ProjectivePoint::IDENTITY;
+        let mut sum_prod_f = Scalar::ZERO;
+        for (k, &pk) in ring.iter().enumerate() {
+            let prod_f = self
+                .f_scalars
+                .iter()
+                .enumerate()
+                .fold(Scalar::ONE, |acc, (j, f)| {
+                    if k & (1 << j) == 0 {
+                        acc * f.i_0
+                    } else {
+                        acc * f.i_1
+                    }
+                });
+
+            sum_pk_prod_f += pk * prod_f;
+            sum_prod_f += prod_f;
+        }
+
+        (sum_pk_prod_f, sum_prod_f)
     }
 }
 
@@ -347,28 +368,6 @@ fn get_coeffs(
     coeff_vecs
 }
 
-fn sum_f_scalars(f_scalars: &[VecElem<Scalar>], ring: &Ring) -> (ProjectivePoint, Scalar) {
-    let mut sum_pk_prod_f = ProjectivePoint::IDENTITY;
-    let mut sum_prod_f = Scalar::ZERO;
-    for (k, &pk) in ring.iter().enumerate() {
-        let prod_f = f_scalars
-            .iter()
-            .enumerate()
-            .fold(Scalar::ONE, |acc, (j, f)| {
-                if k & (1 << j) == 0 {
-                    acc * f.i_0
-                } else {
-                    acc * f.i_1
-                }
-            });
-
-        sum_pk_prod_f += pk * prod_f;
-        sum_prod_f += prod_f;
-    }
-
-    (sum_pk_prod_f, sum_prod_f)
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -402,14 +401,6 @@ mod test {
             z_scalar: Scalar::ZERO,
             tag: AffinePoint::GENERATOR,
         }
-    }
-
-    fn test_ring(size: usize) -> Ring {
-        let mut ring = Ring::with_capacity(size);
-        for _ in 0..size {
-            ring.push((AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine());
-        }
-        ring
     }
 
     #[test]
@@ -485,19 +476,20 @@ mod test {
 
     #[test]
     #[rustfmt::skip]
-    fn f_scalars_summed() {
+    fn sum_f_scalars() {
+        let mut signature = test_signature();
         let ring = vec![
             AffinePoint::GENERATOR,
             (AffinePoint::GENERATOR * Scalar::from(2u32)).to_affine(),
         ];
 
-        let f_scalars = vec![
+        signature.f_scalars = vec![
             VecElem { i_0: Scalar::ONE, i_1: Scalar::from(2u32) },
             VecElem { i_0: Scalar::from(3u32), i_1: Scalar::from(4u32) },
             VecElem { i_0: Scalar::from(5u32), i_1: Scalar::from(6u32) },
         ];
 
-        let (pk_sum, sum) = sum_f_scalars(&f_scalars, &ring);
+        let (pk_sum, sum) = signature.sum_f_scalars(&ring);
         assert_eq!(sum, Scalar::from(45u32));
         assert_eq!(pk_sum, AffinePoint::GENERATOR * Scalar::from(75u32));
     }
@@ -506,151 +498,70 @@ mod test {
     fn valid_signature() {
         let parameters = Parameters::new(10);
         let keypair = Keypair::random();
-        let mut ring = test_ring(5);
+        let ring = vec![
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            keypair.public,
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+        ];
         let index = 2_usize;
-        ring[index] = keypair.public;
+
+        let mut hasher = Keccak256::new();
+        for r in ring.iter() {
+            hasher.update(r.to_bytes());
+        }
+        let ring_hash = hasher.finalize();
 
         let msg = b"hello there!";
         let mut hasher = Keccak256::new();
         hasher.update(msg);
         let msg_hash = hasher.finalize();
 
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_ok());
+        let signature = Signature::new(
+            index,
+            &ring,
+            &ring_hash,
+            &msg_hash,
+            keypair.private,
+            &parameters,
+        )
+        .unwrap();
+        assert_eq!(signature.f_scalars.len(), 3);
+        assert_eq!(signature.x_points.len(), 3);
+        assert_eq!(signature.y_points.len(), 3);
+        let result = signature.verify(&ring, &ring_hash, &msg_hash, &parameters);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn invalid_not_in_ring() {
         let parameters = Parameters::new(10);
         let keypair = Keypair::random();
-        let ring = test_ring(30);
+        let ring = vec![
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            AffinePoint::GENERATOR,
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+            (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
+        ];
         let index = 2_usize;
-        let msg = b"I'm not in the ring!";
+        let mut hasher = Keccak256::new();
+        for r in ring.iter() {
+            hasher.update(r.to_bytes());
+        }
+        let ring_hash = hasher.finalize();
+
+        let msg = b"hello there!";
         let mut hasher = Keccak256::new();
         hasher.update(msg);
         let msg_hash = hasher.finalize();
-
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_err());
     }
-
-    #[test]
-    fn invalid_index() {
-        let parameters = Parameters::new(10);
-        let keypair = Keypair::random();
-        let mut ring = test_ring(10);
-        ring[7] = keypair.public;
-        let index = 2_usize;
-        let msg = b"My pubkey is at the wrong index!";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_err());
-    }
-
-    #[test]
-    fn invalid_msg_hash() {
-        let parameters = Parameters::new(10);
-        let keypair = Keypair::random();
-        let mut ring = test_ring(10);
-        let index = 3_usize;
-        ring[index] = keypair.public;
-        let msg = b"The original message";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-
-        let wrong_msg = b"Some other message";
-        let mut hasher = Keccak256::new();
-        hasher.update(wrong_msg);
-        let wrong_msg_hash = hasher.finalize();
-        assert!(signature
-            .verify(&ring, &wrong_msg_hash, &parameters)
-            .is_err());
-    }
-
-    #[test]
-    fn invalid_different_ring() {
-        let parameters = Parameters::new(10);
-        let keypair = Keypair::random();
-        let mut ring = test_ring(8);
-        let index = 5_usize;
-        ring[index] = keypair.public;
-        let msg = b"asdf";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        ring.push(AffinePoint::GENERATOR);
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_err());
-    }
-
-    #[test]
-    fn invalid_parameters() {
-        let parameters = Parameters::new(10);
-        let keypair = Keypair::random();
-        let mut ring = test_ring(8);
-        let index = 5_usize;
-        ring[index] = keypair.public;
-        let msg = b"asdf";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        let parameters = Parameters::new(10);
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_err());
-    }
-
-    #[test]
-    fn linkability() {
-        let parameters = Parameters::new(10);
-        let keypair = Keypair::random();
-        let mut ring = test_ring(8);
-        let index = 5_usize;
-        ring[index] = keypair.public;
-        let msg = b"asdf";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        // sign exactly the same ring with same message
-        let signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(signature.verify(&ring, &msg_hash, &parameters).is_ok());
-
-        let same_signature =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(same_signature.verify(&ring, &msg_hash, &parameters).is_ok());
-        assert_eq!(same_signature.tag, signature.tag);
-
-        // change message
-        let msg = b"asdf";
-        let mut hasher = Keccak256::new();
-        hasher.update(msg);
-        let msg_hash = hasher.finalize();
-
-        let diff_msg_sig =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(diff_msg_sig.verify(&ring, &msg_hash, &parameters).is_ok());
-        assert_eq!(diff_msg_sig.tag, signature.tag);
-        // change ring and even the parameters
-        let parameters = Parameters::new(10);
-        ring.push(AffinePoint::GENERATOR);
-        let different_sig =
-            Signature::new(index, &ring, &msg_hash, keypair.private, &parameters).unwrap();
-        assert!(different_sig.verify(&ring, &msg_hash, &parameters).is_ok());
-        assert_eq!(different_sig.tag, signature.tag);
-    }
+    // TODO
+    // not in ring
+    // invalid index
+    // invalid hash (ring, msg)
+    // modified ring
+    // wrong parameters
+    // linkability (same tag for same signer)
 }
