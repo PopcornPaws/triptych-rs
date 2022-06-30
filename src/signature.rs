@@ -142,7 +142,7 @@ impl Signature {
         hasher.update(c_com.to_bytes());
         hasher.update(d_com.to_bytes());
 
-        let coeff_vecs = get_coeffs(index, ring.len(), m, &a_vec, &b_vec, &omegas);
+        let coeff_vecs = get_coeffs(index, ring.len(), m, &a_vec, &b_vec, &omegas)?;
 
         let mut x_points = Vec::<AffinePoint>::with_capacity(m);
         let mut y_points = Vec::<AffinePoint>::with_capacity(m);
@@ -321,7 +321,7 @@ fn get_coeffs(
     a_vec: &[VecElem<Scalar>],
     b_vec: &[VecElem<Scalar>],
     omegas: &[Scalar],
-) -> Vec<Vec<Scalar>> {
+) -> Result<Vec<Vec<Scalar>>, String> {
     let mut coeff_vecs = Vec::<Vec<Scalar>>::new();
     for k in 0..n {
         let mut evals = vec![Scalar::ONE; m];
@@ -340,11 +340,10 @@ fn get_coeffs(
             }
         }
 
-        // TODO unwrap
-        let coeffs = interpolate(&omegas, &evals).unwrap();
+        let coeffs = interpolate(omegas, &evals)?;
         coeff_vecs.push(coeffs);
     }
-    coeff_vecs
+    Ok(coeff_vecs)
 }
 
 fn sum_f_scalars(f_scalars: &[VecElem<Scalar>], ring: &Ring) -> (ProjectivePoint, Scalar) {
@@ -449,7 +448,7 @@ mod test {
             VecElem { i_0: Scalar::from(7u32), i_1: Scalar::from(8u32) },
         ];
 
-        let coeffs = get_coeffs(index, n, m, &a_vec, &b_vec, &omegas);
+        let coeffs = get_coeffs(index, n, m, &a_vec, &b_vec, &omegas).unwrap();
         assert_eq!(-coeffs[0][0], Scalar::from(207u32));
         assert_eq!(-coeffs[1][0], Scalar::from(240u32));
         assert_eq!(-coeffs[2][0], Scalar::from(236u32));
