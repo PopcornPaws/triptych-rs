@@ -14,7 +14,6 @@ const U_SCALAR_U256: U256 =
 pub struct Parameters {
     generators: Vec<VecElem<AffinePoint>>,
     h_point: AffinePoint,
-    u_point: AffinePoint,
 }
 
 impl Parameters {
@@ -32,8 +31,6 @@ impl Parameters {
         Self {
             generators,
             h_point: (AffinePoint::GENERATOR * Scalar::random(OsRng)).to_affine(),
-            u_point: (AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256))
-                .to_affine(),
         }
     }
 }
@@ -73,8 +70,9 @@ impl Signature {
         hasher.update(message_hash);
         hasher.update(ring_hash);
 
+        let u_point = AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256);
         // TODO unwrap
-        let j_point = parameters.u_point * privkey.invert().unwrap();
+        let j_point = u_point * privkey.invert().unwrap();
 
         let mut ring = ring.to_owned();
         let m = pad_ring_to_2n(&mut ring)?;
@@ -207,6 +205,7 @@ impl Signature {
         message_hash: &[u8],
         parameters: &Parameters,
     ) -> Result<(), String> {
+        let u_point = AffinePoint::GENERATOR * Scalar::from_uint_reduced(U_SCALAR_U256);
         let mut hasher = Keccak256::new();
         hasher.update(message_hash);
         hasher.update(ring_hash);
@@ -267,7 +266,7 @@ impl Signature {
         let (x_sum, y_sum) = self.sum_points_with_challenge(xi);
 
         let first_zero = sum_pk_prod_f - x_sum - AffinePoint::GENERATOR * self.z_scalar;
-        let second_zero = parameters.u_point * sum_prod_f - y_sum - self.tag * self.z_scalar;
+        let second_zero = u_point * sum_prod_f - y_sum - self.tag * self.z_scalar;
 
         if first_zero.to_affine() != AffinePoint::IDENTITY {
             return Err("first constraint is nonzero".to_owned());
@@ -491,6 +490,7 @@ mod test {
 
         let (pk_sum, sum) = signature.sum_f_scalars(&ring);
         assert_eq!(sum, Scalar::from(45u32));
+        assert_eq!(pk_sum, AffinePoint::GENERATOR * Scalar::from(75u32));
     }
 
     #[test]
@@ -530,7 +530,12 @@ mod test {
         assert_eq!(signature.x_points.len(), 3);
         assert_eq!(signature.y_points.len(), 3);
         let result = signature.verify(&ring, &ring_hash, &msg_hash, &parameters);
-        println!("{:?}", result);
         assert!(result.is_ok());
     }
+    // TODO
+    // not in ring
+    // invalid index
+    // invalid hash (ring, msg)
+    // modified ring
+    // linkability (same tag for same signer)
 }
