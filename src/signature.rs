@@ -1,9 +1,11 @@
 use crate::ring::*;
+use crate::utils::interpolate;
 use k256::elliptic_curve::group::GroupEncoding;
 use k256::elliptic_curve::ops::Reduce;
 use k256::elliptic_curve::{Field, PrimeField};
 use k256::{AffinePoint, ProjectivePoint, Scalar, U256};
 use rand_core::OsRng;
+use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
 // NOTE this is a public "private key" that determines the U point which is used
@@ -11,6 +13,7 @@ use sha3::{Digest, Keccak256};
 const U_SCALAR_U256: U256 =
     U256::from_le_hex("7c81a9587b8da43a9519bd50d96191fd8f2c4f66b8f1550e366e3c7f9ed18897");
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Parameters {
     generators: Vec<VecElem<AffinePoint>>,
     h_point: AffinePoint,
@@ -35,12 +38,13 @@ impl Parameters {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct VecElem<T: Clone + Copy + std::fmt::Debug + PartialEq + Eq> {
     i_0: T,
     i_1: T,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Signature {
     a_commitment: AffinePoint,
     b_commitment: AffinePoint,
@@ -374,21 +378,7 @@ fn sum_f_scalars(f_scalars: &[VecElem<Scalar>], ring: &Ring) -> (ProjectivePoint
 #[cfg(test)]
 mod test {
     use super::*;
-
-    struct Keypair {
-        public: AffinePoint,
-        private: Scalar,
-    }
-
-    impl Keypair {
-        fn random() -> Self {
-            let private = Scalar::random(OsRng);
-            Self {
-                public: (AffinePoint::GENERATOR * private).to_affine(),
-                private,
-            }
-        }
-    }
+    use crate::keypair::Keypair;
 
     fn test_signature() -> Signature {
         Signature {
